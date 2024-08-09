@@ -101,7 +101,21 @@ func SubmitValidatorProofChunk(ctx context.Context, ownerAccount *Owner, eigenPo
 	if verbose {
 		color.Green("submitting onchain...")
 	}
-	txn, err := eigenPod.VerifyWithdrawalCredentials(
+
+	// Retrieve the EigenPod owner (NDC) address
+	eigenPodOwner, err := eigenPod.PodOwner(nil)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get EigenPod owner (NDC): %w", err)
+	}
+
+	// Create a new NodeDelegator instance (it has same VerifyWithdrawalCredentials fn)
+	ndc, err := onchain.NewEigenPod(eigenPodOwner, eth)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create NodeDelegator instance: %w", err)
+	}
+
+	txn, err := ndc.VerifyWithdrawalCredentials(
 		ownerAccount.TransactionOptions,
 		oracleBeaconTimesetamp,
 		onchain.BeaconChainProofsStateRootProof{
