@@ -132,13 +132,13 @@ func StartCheckpoint(ctx context.Context, eigenpodAddress string, ownerPrivateKe
 	eigenPodOwner, err := eigenPod.PodOwner(nil)
 
 	if err != nil {
-		return 0, fmt.Errorf("failed to get EigenPod owner (NDC): %w", err)
+		return nil, fmt.Errorf("failed to get EigenPod owner (NDC): %w", err)
 	}
 
 	// Create a new NodeDelegator instance (it has same StartCheckpoint fn)
 	ndc, err := onchain.NewEigenPod(eigenPodOwner, eth)
 	if err != nil {
-		return 0, fmt.Errorf("failed to create NodeDelegator instance: %w", err)
+		return nil, fmt.Errorf("failed to create NodeDelegator instance: %w", err)
 	}
 
 	revertIfNoBalance := !forceCheckpoint
