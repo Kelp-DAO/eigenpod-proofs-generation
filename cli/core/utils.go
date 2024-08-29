@@ -321,15 +321,7 @@ func CastBalanceProofs(proofs []*eigenpodproofs.BalanceProof) []onchain.BeaconCh
 }
 
 func PanicIfNoConsent(prompt string) {
-	color.New(color.Bold).Printf("%s - Do you want to proceed? (y/n): ", prompt)
-	var reply string
-
-	fmt.Scanln(&reply)
-	if reply == "y" {
-		return
-	} else {
-		Panic("abort.")
-	}
+	return
 }
 
 func PrepareAccount(owner *string, chainID *big.Int, noSend bool) (*Owner, error) {
