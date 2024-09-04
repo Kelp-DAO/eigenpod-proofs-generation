@@ -3,7 +3,7 @@ package main
 import cli "github.com/urfave/cli/v2"
 
 // Required for commands that need an EigenPod's address
-var POD_ADDRESS_FLAG = &cli.StringFlag{
+var PodAddressFlag = &cli.StringFlag{
 	Name:        "podAddress",
 	Aliases:     []string{"p", "pod"},
 	Value:       "",
@@ -13,7 +13,7 @@ var POD_ADDRESS_FLAG = &cli.StringFlag{
 }
 
 // Required for commands that need a beacon chain RPC
-var BEACON_NODE_FLAG = &cli.StringFlag{
+var BeaconNodeFlag = &cli.StringFlag{
 	Name:        "beaconNode",
 	Aliases:     []string{"b"},
 	Value:       "",
@@ -23,7 +23,7 @@ var BEACON_NODE_FLAG = &cli.StringFlag{
 }
 
 // Required for commands that need an execution layer RPC
-var EXEC_NODE_FLAG = &cli.StringFlag{
+var ExecNodeFlag = &cli.StringFlag{
 	Name:        "execNode",
 	Aliases:     []string{"e"},
 	Value:       "",
@@ -35,7 +35,7 @@ var EXEC_NODE_FLAG = &cli.StringFlag{
 // Optional commands:
 
 // Optional use for commands that want direct tx submission from a specific private key
-var SENDER_PK_FLAG = &cli.StringFlag{
+var SenderPkFlag = &cli.StringFlag{
 	Name:        "sender",
 	Aliases:     []string{"s"},
 	Value:       "",
@@ -43,13 +43,21 @@ var SENDER_PK_FLAG = &cli.StringFlag{
 	Destination: &sender,
 }
 
+var EstimateGasFlag = &cli.BoolFlag{
+	Name:        "gas",
+	Aliases:     []string{"g"},
+	Value:       false,
+	Usage:       "Estimate gas on the transaction (using `--sender` as the sender for simulation). This will NOT send the transaction.",
+	Destination: &estimateGas,
+}
+
 // Optional use for commands that support JSON output
-var PRINT_JSON_FLAG = &cli.BoolFlag{
+var PrintJSONFlag = &cli.BoolFlag{
 	Name:        "json",
 	Value:       false,
 	Usage:       "print only plain JSON",
 	Required:    false,
-	Destination: &useJson,
+	Destination: &useJSON,
 }
 
 // shared flag --batch

@@ -74,7 +74,7 @@ func StatusCommand(args TStatusArgs) error {
 			for _, validator := range awaitingActivationQueueValidators {
 				publicKey := validator.PublicKey
 				if !isVerbose {
-					publicKey = shortenHex(publicKey)
+					publicKey = utils.ShortenHex(publicKey)
 				}
 
 				targetColor = color.New(color.FgHiRed)
@@ -97,7 +97,7 @@ func StatusCommand(args TStatusArgs) error {
 			for _, validator := range inactiveValidators {
 				publicKey := validator.PublicKey
 				if !isVerbose {
-					publicKey = shortenHex(publicKey)
+					publicKey = utils.ShortenHex(publicKey)
 				}
 
 				if validator.Slashed {
@@ -105,7 +105,6 @@ func StatusCommand(args TStatusArgs) error {
 				} else {
 					targetColor.Printf("\t- #%d (%s) [%d] [%d]\n", validator.Index, publicKey, validator.EffectiveBalance, validator.CurrentBalance)
 				}
-
 			}
 
 			fmt.Println()
@@ -121,7 +120,7 @@ func StatusCommand(args TStatusArgs) error {
 			for _, validator := range activeValidators {
 				publicKey := validator.PublicKey
 				if !isVerbose {
-					publicKey = shortenHex(publicKey)
+					publicKey = utils.ShortenHex(publicKey)
 				}
 
 				if validator.Slashed {
@@ -144,7 +143,7 @@ func StatusCommand(args TStatusArgs) error {
 			for _, validator := range withdrawnValidators {
 				publicKey := validator.PublicKey
 				if !isVerbose {
-					publicKey = shortenHex(publicKey)
+					publicKey = utils.ShortenHex(publicKey)
 				}
 
 				if validator.Slashed {

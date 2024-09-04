@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"math/big"
 	"os"
 	"sort"
+	"strconv"
 
 	eigenpodproofs "github.com/Layr-Labs/eigenpod-proofs-generation"
 	"github.com/Layr-Labs/eigenpod-proofs-generation/cli/core/onchain"
@@ -48,6 +50,10 @@ func WeiToGwei(val *big.Int) *big.Float {
 
 func GweiToEther(val *big.Float) *big.Float {
 	return new(big.Float).Quo(val, big.NewFloat(params.GWei))
+}
+
+func GweiToWei(val *big.Float) *big.Float {
+	return new(big.Float).Mul(val, big.NewFloat(params.GWei))
 }
 
 func IweiToEther(val *big.Int) *big.Float {
@@ -169,10 +175,71 @@ func GetCurrentCheckpoint(eigenpodAddress string, client *ethclient.Client) (uin
 	timestamp, err := eigenPod.CurrentCheckpointTimestamp(nil)
 	if err != nil {
 		return 0, fmt.Errorf("failed to locate eigenpod. Is your address correct?: %w", err)
-
 	}
 
 	return timestamp, nil
+}
+
+// Fetch and return the current checkpoint timestamp for the pod
+// If the checkpoint exists (timestamp != 0), also return the beacon state for the checkpoint
+// If the checkpoint does not exist (timestamp == 0), return the head beacon state (i.e. the state we would use "if we start a checkpoint now")
+func GetCheckpointTimestampAndBeaconState(
+	ctx context.Context,
+	eigenpodAddress string,
+	eth *ethclient.Client,
+	beaconClient BeaconClient,
+) (uint64, *spec.VersionedBeaconState, error) {
+	tracing := GetContextTracingCallbacks(ctx)
+
+	tracing.OnStartSection("GetCurrentCheckpoint", map[string]string{})
+	checkpointTimestamp, err := GetCurrentCheckpoint(eigenpodAddress, eth)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to fetch current checkpoint: %w", err)
+	}
+	tracing.OnEndSection()
+
+	// stateId to look up beacon state. "head" by default (if we do not have a checkpoint)
+	beaconStateId := "head"
+
+	// If we have a checkpoint, get the state id for the checkpoint's block root
+	if checkpointTimestamp != 0 {
+		// Fetch the checkpoint's block root
+		tracing.OnStartSection("GetCurrentCheckpointBlockRoot", map[string]string{})
+		blockRoot, err := GetCurrentCheckpointBlockRoot(eigenpodAddress, eth)
+		if err != nil {
+			return 0, nil, fmt.Errorf("failed to fetch last checkpoint: %w", err)
+		}
+		if blockRoot == nil {
+			return 0, nil, fmt.Errorf("failed to fetch last checkpoint - nil blockRoot")
+		}
+		// Block root should be nonzero because we have an active checkpoint
+		rootBytes := *blockRoot
+		if AllZero(rootBytes[:]) {
+			return 0, nil, fmt.Errorf("failed to fetch last checkpoint - empty blockRoot")
+		}
+		tracing.OnEndSection()
+
+		headerBlock := "0x" + hex.EncodeToString((*blockRoot)[:])
+		tracing.OnStartSection("GetBeaconHeader", map[string]string{})
+		header, err := beaconClient.GetBeaconHeader(ctx, headerBlock)
+		if err != nil {
+			return 0, nil, fmt.Errorf("failed to fetch beacon header (%s): %w", headerBlock, err)
+		}
+		tracing.OnEndSection()
+
+		beaconStateId = strconv.FormatUint(uint64(header.Header.Message.Slot), 10)
+	} else {
+		beaconStateId = "head"
+	}
+
+	tracing.OnStartSection("GetBeaconState", map[string]string{})
+	beaconState, err := beaconClient.GetBeaconState(ctx, beaconStateId)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to fetch beacon state: %w", err)
+	}
+	tracing.OnEndSection()
+
+	return checkpointTimestamp, beaconState, nil
 }
 
 func SortByStatus(validators map[string]Validator) ([]Validator, []Validator, []Validator, []Validator) {
@@ -227,7 +294,7 @@ func FindAllValidatorsForEigenpod(eigenpodAddress string, beaconState *spec.Vers
 		}
 		// we check that the last 20 bytes of expectedCredentials matches validatorCredentials.
 		if bytes.Equal(
-			eigenpodAddressBytes[:],
+			eigenpodAddressBytes,
 			validator.WithdrawalCredentials[12:], // first 12 bytes are not the pubKeyHash, see (https://github.com/Layr-Labs/eigenlayer-contracts/blob/d148952a2942a97a218a2ab70f9b9f1792796081/src/contracts/pods/EigenPod.sol#L663)
 		) {
 			outputValidators = append(outputValidators, ValidatorWithIndex{
@@ -282,6 +349,10 @@ func GetCurrentCheckpointBlockRoot(eigenpodAddress string, eth *ethclient.Client
 	return &checkpoint.BeaconBlockRoot, nil
 }
 
+func IsAwaitingWithdrawalCredentialProof(validatorInfo onchain.IEigenPodValidatorInfo, validator *phase0.Validator) bool {
+	return (validatorInfo.Status == ValidatorStatusInactive) && validator.ExitEpoch == FAR_FUTURE_EPOCH && validator.ActivationEpoch != FAR_FUTURE_EPOCH
+}
+
 func GetClients(ctx context.Context, node, beaconNodeUri string, enableLogs bool) (*ethclient.Client, BeaconClient, *big.Int, error) {
 	eth, err := ethclient.Dial(node)
 	if err != nil {
@@ -293,8 +364,8 @@ func GetClients(ctx context.Context, node, beaconNodeUri string, enableLogs bool
 		return nil, nil, nil, fmt.Errorf("failed to fetch chain id: %w", err)
 	}
 
-	if chainId == nil || chainId.Int64() != 17000 {
-		return nil, nil, nil, errors.New("this tool only supports the Holesky network")
+	if chainId == nil || (chainId.Int64() != 17000 && chainId.Int64() != 1) {
+		return nil, nil, nil, errors.New("this tool only supports the Holesky and Mainnet Ethereum Networks")
 	}
 
 	beaconClient, err := GetBeaconClient(beaconNodeUri, enableLogs)
@@ -326,7 +397,15 @@ func PanicIfNoConsent(prompt string) {
 
 func PrepareAccount(owner *string, chainID *big.Int, noSend bool) (*Owner, error) {
 	if noSend {
-		privateKey, err := crypto.HexToECDSA("372d94b8645091147a5dfc10a454d0d539773d2431293bf0a195b44fa5ddbb33") // this is a RANDOM private key. Do not use this for anything.
+		isSimulatingGas := owner != nil && *owner != ""
+		var senderPk = func() string {
+			if owner == nil || *owner == "" {
+				return "372d94b8645091147a5dfc10a454d0d539773d2431293bf0a195b44fa5ddbb33" // this is a RANDOM private key. Do not use this for anything.
+			}
+			return *owner
+		}()
+
+		privateKey, err := crypto.HexToECDSA(senderPk)
 		if err != nil {
 			return nil, err
 		}
@@ -342,10 +421,12 @@ func PrepareAccount(owner *string, chainID *big.Int, noSend bool) (*Owner, error
 			return nil, err
 		}
 
-		auth.GasPrice = nil             // big.NewInt(10)  // Gas price to use for the transaction execution (nil = gas price oracle)
-		auth.GasFeeCap = big.NewInt(10) // big.NewInt(10) // Gas fee cap to use for the 1559 transaction execution (nil = gas price oracle)
-		auth.GasTipCap = big.NewInt(2)  // big.NewInt(2) // Gas priority fee cap to use for the 1559 transaction execution (nil = gas price oracle)
-		auth.GasLimit = 21000
+		if !isSimulatingGas {
+			auth.GasPrice = nil             // big.NewInt(10)  // Gas price to use for the transaction execution (nil = gas price oracle)
+			auth.GasFeeCap = big.NewInt(10) // big.NewInt(10) // Gas fee cap to use for the 1559 transaction execution (nil = gas price oracle)
+			auth.GasTipCap = big.NewInt(2)  // big.NewInt(2) // Gas priority fee cap to use for the 1559 transaction execution (nil = gas price oracle)
+			auth.GasLimit = 21000
+		}
 		auth.NoSend = true
 
 		return &Owner{

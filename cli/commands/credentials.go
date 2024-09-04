@@ -7,6 +7,7 @@ import (
 	"math/big"
 
 	"github.com/Layr-Labs/eigenpod-proofs-generation/cli/core"
+	"github.com/Layr-Labs/eigenpod-proofs-generation/cli/utils"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/fatih/color"
@@ -33,15 +34,11 @@ func CredentialsCommand(args TCredentialCommandArgs) error {
 		color.NoColor = true
 	}
 
+	isGasEstimate := args.SimulateTransaction && args.Sender != ""
 	isVerbose := (!args.UseJSON && !args.SimulateTransaction) || args.Verbose
 
 	eth, beaconClient, chainId, err := core.GetClients(ctx, args.Node, args.BeaconNode, isVerbose)
 	core.PanicOnError("failed to reach ethereum clients", err)
-
-	if args.SimulateTransaction && len(args.Sender) > 0 {
-		core.Panic("if using --print-calldata, please do not specify a --sender.")
-		return nil
-	}
 
 	var specificValidatorIndex *big.Int = nil
 	if args.SpecificValidator != math.MaxUint64 && args.SpecificValidator != 0 {
@@ -69,19 +66,26 @@ func CredentialsCommand(args TCredentialCommandArgs) error {
 		}()), err)
 
 		if args.SimulateTransaction {
-			out := aMap(txns, func(txn *types.Transaction) CredentialProofTransaction {
+			out := utils.Map(txns, func(txn *types.Transaction, _ uint64) CredentialProofTransaction {
+				gas := txn.Gas()
 				return CredentialProofTransaction{
 					Transaction: Transaction{
 						Type:     "credential_proof",
 						To:       txn.To().Hex(),
 						CallData: common.Bytes2Hex(txn.Data()),
+						GasEstimateGwei: func() *uint64 {
+							if isGasEstimate {
+								return &gas
+							}
+							return nil
+						}(),
 					},
-					ValidatorIndices: aMap(aFlatten(indices), func(index *big.Int) uint64 {
+					ValidatorIndices: utils.Map(utils.Flatten(indices), func(index *big.Int, _ uint64) uint64 {
 						return index.Uint64()
 					}),
 				}
 			})
-			printProofs(out)
+			printAsJSON(out)
 		} else {
 			for i, txn := range txns {
 				color.Green("transaction(%d): %s", i, txn.Hash().Hex())

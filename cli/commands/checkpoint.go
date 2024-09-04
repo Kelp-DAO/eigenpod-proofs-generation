@@ -5,6 +5,7 @@ import (
 
 	"github.com/Layr-Labs/eigenpod-proofs-generation/cli/core"
 	"github.com/Layr-Labs/eigenpod-proofs-generation/cli/core/onchain"
+	"github.com/Layr-Labs/eigenpod-proofs-generation/cli/utils"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -32,12 +33,8 @@ func CheckpointCommand(args TCheckpointCommandArgs) error {
 		color.NoColor = true
 	}
 
+	isGasEstimate := args.SimulateTransaction && args.Sender != ""
 	isVerbose := !args.SimulateTransaction || args.Verbose
-
-	if args.SimulateTransaction && len(args.Sender) > 0 {
-		core.Panic("if using `--print-calldata`, please do not specify a sender.")
-		return nil
-	}
 
 	eth, beaconClient, chainId, err := core.GetClients(ctx, args.Node, args.BeaconNode, isVerbose)
 	core.PanicOnError("failed to reach ethereum clients", err)
@@ -62,11 +59,18 @@ func CheckpointCommand(args TCheckpointCommandArgs) error {
 				bind.WaitMined(ctx, eth, txn)
 				color.Green("started checkpoint! txn: %s", txn.Hash().Hex())
 			} else {
-				printProofs([]Transaction{
+				gas := txn.Gas()
+				printAsJSON([]Transaction{
 					{
 						Type:     "checkpoint_start",
 						To:       txn.To().Hex(),
 						CallData: common.Bytes2Hex(txn.Data()),
+						GasEstimateGwei: func() *uint64 {
+							if isGasEstimate {
+								return &gas
+							}
+							return nil
+						}(),
 					},
 				})
 
@@ -86,19 +90,19 @@ func CheckpointCommand(args TCheckpointCommandArgs) error {
 		color.Green("pod has active checkpoint! checkpoint timestamp: %d", currentCheckpoint)
 	}
 
-	proof, err := core.GenerateCheckpointProof(ctx, args.EigenpodAddress, eth, chainId, beaconClient)
+	proof, err := core.GenerateCheckpointProof(ctx, args.EigenpodAddress, eth, chainId, beaconClient, isVerbose)
 	core.PanicOnError("failed to generate checkpoint proof", err)
 
-	txns, err := core.SubmitCheckpointProof(ctx, args.Sender, args.EigenpodAddress, chainId, proof, eth, args.BatchSize, args.NoPrompt, args.SimulateTransaction)
+	txns, err := core.SubmitCheckpointProof(ctx, args.Sender, args.EigenpodAddress, chainId, proof, eth, args.BatchSize, args.NoPrompt, args.SimulateTransaction, args.Verbose)
 	if args.SimulateTransaction {
-		printableTxns := aMap(txns, func(txn *types.Transaction) Transaction {
+		printableTxns := utils.Map(txns, func(txn *types.Transaction, _ uint64) Transaction {
 			return Transaction{
 				To:       txn.To().Hex(),
 				CallData: common.Bytes2Hex(txn.Data()),
 				Type:     "checkpoint_proof",
 			}
 		})
-		printProofs(printableTxns)
+		printAsJSON(printableTxns)
 	} else {
 		for i, txn := range txns {
 			color.Green("transaction(%d): %s", i, txn.Hash().Hex())

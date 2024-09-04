@@ -11,13 +11,20 @@ import (
 
 // Destinations for values set by various flags
 var eigenpodAddress, beacon, node, sender string
-var useJson bool = false
+var useJSON = false
 var specificValidator uint64 = math.MaxUint64
+var estimateGas = false
+var slashedValidatorIndex uint64
+
+const DefaultHealthcheckTolerance = float64(5.0)
 
 func main() {
 	var batchSize uint64
-	var forceCheckpoint, disableColor, verbose bool
-	var noPrompt bool
+	var forceCheckpoint = false
+	var disableColor = false
+	var verbose = false
+	var noPrompt = false
+	var tolerance = DefaultHealthcheckTolerance
 
 	app := &cli.App{
 		Name:                   "Eigenlayer Proofs CLi",
@@ -27,14 +34,69 @@ func main() {
 		UseShortOptionHandling: true,
 		Commands: []*cli.Command{
 			{
+				Name:      "find-stale-pods",
+				Args:      true,
+				Usage:     "Locate stale pods, whose balances have deviated by more than 5% due to beacon slashing.",
+				UsageText: "./cli find-stale-pods <args>",
+				Flags: []cli.Flag{
+					ExecNodeFlag,
+					BeaconNodeFlag,
+					&cli.Float64Flag{
+						Name:        "tolerance",
+						Value:       DefaultHealthcheckTolerance, // default: 5
+						Usage:       "The percentage balance deviation to tolerate when deciding whether an eigenpod should be corrected. Default is 5% (e.g --tolerance 5).",
+						Destination: &tolerance,
+					},
+				},
+				Action: func(_ *cli.Context) error {
+					return commands.FindStalePodsCommand(commands.TFindStalePodsCommandArgs{
+						EthNode:    node,
+						BeaconNode: beacon,
+						Verbose:    verbose,
+						Tolerance:  tolerance,
+					})
+				},
+			},
+			{
+				Name:      "correct-stale-pod",
+				Args:      true,
+				Usage:     "Correct a stale balance on an eigenpod, which has been slashed on the beacon chain.",
+				UsageText: "./cli correct-stale-pod [FLAGS] <validatorIndex>",
+				Flags: []cli.Flag{
+					PodAddressFlag,
+					ExecNodeFlag,
+					BeaconNodeFlag,
+					BatchBySize(&batchSize, utils.DEFAULT_BATCH_CHECKPOINT),
+					Require(SenderPkFlag),
+					&cli.Uint64Flag{
+						Name:        "validatorIndex",
+						Usage:       "The index of a validator slashed that belongs to the pod.",
+						Required:    true,
+						Destination: &slashedValidatorIndex,
+					},
+				},
+				Action: func(_ *cli.Context) error {
+					return commands.FixStaleBalance(commands.TFixStaleBalanceArgs{
+						EthNode:               node,
+						BeaconNode:            beacon,
+						Sender:                sender,
+						EigenpodAddress:       eigenpodAddress,
+						SlashedValidatorIndex: slashedValidatorIndex,
+						Verbose:               verbose,
+						CheckpointBatchSize:   batchSize,
+						NoPrompt:              noPrompt,
+					})
+				},
+			},
+			{
 				Name:      "assign-submitter",
 				Args:      true,
 				Usage:     "Assign a different address to be able to submit your proofs. You'll always be able to submit from your EigenPod owner PK.",
 				UsageText: "./cli assign-submitter [FLAGS] <0xsubmitter>",
 				Flags: []cli.Flag{
-					POD_ADDRESS_FLAG,
-					EXEC_NODE_FLAG,
-					Require(SENDER_PK_FLAG),
+					PodAddressFlag,
+					ExecNodeFlag,
+					Require(SenderPkFlag),
 				},
 				Action: func(cctx *cli.Context) error {
 					return commands.AssignSubmitterCommand(commands.TAssignSubmitterArgs{
@@ -51,16 +113,16 @@ func main() {
 				Name:  "status",
 				Usage: "Checks the status of your eigenpod.",
 				Flags: []cli.Flag{
-					POD_ADDRESS_FLAG,
-					BEACON_NODE_FLAG,
-					EXEC_NODE_FLAG,
-					PRINT_JSON_FLAG,
+					PodAddressFlag,
+					BeaconNodeFlag,
+					ExecNodeFlag,
+					PrintJSONFlag,
 				},
-				Action: func(cctx *cli.Context) error {
+				Action: func(_ *cli.Context) error {
 					return commands.StatusCommand(commands.TStatusArgs{
 						EigenpodAddress: eigenpodAddress,
 						DisableColor:    disableColor,
-						UseJSON:         useJson,
+						UseJSON:         useJSON,
 						Node:            node,
 						BeaconNode:      beacon,
 						Verbose:         verbose,
@@ -72,10 +134,11 @@ func main() {
 				Aliases: []string{"cp"},
 				Usage:   "Generates a proof for use with EigenPod.verifyCheckpointProofs().",
 				Flags: []cli.Flag{
-					POD_ADDRESS_FLAG,
-					BEACON_NODE_FLAG,
-					EXEC_NODE_FLAG,
-					SENDER_PK_FLAG,
+					PodAddressFlag,
+					BeaconNodeFlag,
+					ExecNodeFlag,
+					SenderPkFlag,
+					EstimateGasFlag,
 					BatchBySize(&batchSize, utils.DEFAULT_BATCH_CHECKPOINT),
 					&cli.BoolFlag{
 						Name:        "force",
@@ -85,11 +148,11 @@ func main() {
 						Destination: &forceCheckpoint,
 					},
 				},
-				Action: func(cctx *cli.Context) error {
+				Action: func(_ *cli.Context) error {
 					return commands.CheckpointCommand(commands.TCheckpointCommandArgs{
 						DisableColor:        disableColor,
 						NoPrompt:            noPrompt,
-						SimulateTransaction: len(sender) == 0,
+						SimulateTransaction: sender == "" || estimateGas,
 						BatchSize:           batchSize,
 						ForceCheckpoint:     forceCheckpoint,
 						Node:                node,
@@ -105,10 +168,11 @@ func main() {
 				Aliases: []string{"cr", "creds"},
 				Usage:   "Generates a proof for use with EigenPod.verifyWithdrawalCredentials()",
 				Flags: []cli.Flag{
-					POD_ADDRESS_FLAG,
-					BEACON_NODE_FLAG,
-					EXEC_NODE_FLAG,
-					SENDER_PK_FLAG,
+					PodAddressFlag,
+					BeaconNodeFlag,
+					ExecNodeFlag,
+					SenderPkFlag,
+					EstimateGasFlag,
 					BatchBySize(&batchSize, utils.DEFAULT_BATCH_CREDENTIALS),
 					&cli.Uint64Flag{
 						Name:        "validatorIndex",
@@ -116,12 +180,12 @@ func main() {
 						Destination: &specificValidator,
 					},
 				},
-				Action: func(cctx *cli.Context) error {
+				Action: func(_ *cli.Context) error {
 					return commands.CredentialsCommand(commands.TCredentialCommandArgs{
 						EigenpodAddress:     eigenpodAddress,
 						DisableColor:        disableColor,
-						UseJSON:             useJson,
-						SimulateTransaction: len(sender) == 0,
+						UseJSON:             useJSON,
+						SimulateTransaction: sender == "" || estimateGas,
 						Node:                node,
 						BeaconNode:          beacon,
 						Sender:              sender,
