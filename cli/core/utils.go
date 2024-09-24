@@ -1,7 +1,6 @@
 package core
 
 import (
-	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/sha256"
@@ -57,6 +56,10 @@ func GweiToEther(val *big.Float) *big.Float {
 
 func GweiToWei(val *big.Float) *big.Float {
 	return new(big.Float).Mul(val, big.NewFloat(params.GWei))
+}
+
+func IGweiToWei(val *big.Int) *big.Int {
+	return new(big.Int).Mul(val, big.NewInt(params.GWei))
 }
 
 func IweiToEther(val *big.Int) *big.Float {
@@ -219,8 +222,6 @@ func GetCheckpointTimestampAndBeaconState(
 		tracing.OnEndSection()
 
 		beaconStateId = strconv.FormatUint(uint64(header.Header.Message.Slot), 10)
-	} else {
-		beaconStateId = "head"
 	}
 
 	tracing.OnStartSection("GetBeaconState", map[string]string{})
@@ -273,7 +274,7 @@ func FindAllValidatorsForEigenpod(eigenpodAddress string, beaconState *spec.Vers
 		return nil, fmt.Errorf("failed to fetch beacon state: %w", err)
 	}
 
-	eigenpodAddressBytes := common.FromHex(eigenpodAddress)
+	eigenpod := common.HexToAddress(eigenpodAddress)
 
 	var outputValidators []ValidatorWithIndex = []ValidatorWithIndex{}
 	var i uint64 = 0
@@ -284,10 +285,10 @@ func FindAllValidatorsForEigenpod(eigenpodAddress string, beaconState *spec.Vers
 			continue
 		}
 		// we check that the last 20 bytes of expectedCredentials matches validatorCredentials.
-		if bytes.Equal(
-			eigenpodAddressBytes,
-			validator.WithdrawalCredentials[12:], // first 12 bytes are not the pubKeyHash, see (https://github.com/Layr-Labs/eigenlayer-contracts/blob/d148952a2942a97a218a2ab70f9b9f1792796081/src/contracts/pods/EigenPod.sol#L663)
-		) {
+		// // first 12 bytes are not the pubKeyHash, see (https://github.com/Layr-Labs/eigenlayer-contracts/blob/d148952a2942a97a218a2ab70f9b9f1792796081/src/contracts/pods/EigenPod.sol#L663)
+		validatorWithdrawalAddress := common.BytesToAddress(validator.WithdrawalCredentials[12:])
+
+		if eigenpod.Cmp(validatorWithdrawalAddress) == 0 {
 			outputValidators = append(outputValidators, ValidatorWithIndex{
 				Validator: validator,
 				Index:     i,
@@ -299,7 +300,7 @@ func FindAllValidatorsForEigenpod(eigenpodAddress string, beaconState *spec.Vers
 
 var zeroes = [16]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 
-func FetchMultipleOnchainValidatorInfo(ctx context.Context, client *ethclient.Client, eigenpodAddress string, allValidators []ValidatorWithIndex) ([]ValidatorWithOnchainInfo, error) {
+func FetchMultipleOnchainValidatorInfoMulticalls(eigenpodAddress string, allValidators []*phase0.Validator) ([]*multicall.MultiCallMetaData[*onchain.IEigenPodValidatorInfo], error) {
 	eigenpodAbi, err := abi.JSON(strings.NewReader(onchain.EigenPodABI))
 	if err != nil {
 		return nil, fmt.Errorf("failed to load eigenpod abi: %s", err)
@@ -310,10 +311,10 @@ func FetchMultipleOnchainValidatorInfo(ctx context.Context, client *ethclient.Cl
 		Error     error
 	}
 
-	requests := utils.Map(allValidators, func(validator ValidatorWithIndex, index uint64) MulticallAndError {
+	requests := utils.Map(allValidators, func(validator *phase0.Validator, index uint64) MulticallAndError {
 		pubKeyHash := sha256.Sum256(
 			append(
-				validator.Validator.PublicKey[:],
+				validator.PublicKey[:],
 				zeroes[:]...,
 			),
 		)
@@ -346,9 +347,19 @@ func FetchMultipleOnchainValidatorInfo(ctx context.Context, client *ethclient.Cl
 	allMulticalls := utils.Map(requests, func(mc MulticallAndError, _ uint64) *multicall.MultiCallMetaData[*onchain.IEigenPodValidatorInfo] {
 		return mc.Multicall
 	})
+	return allMulticalls, nil
+}
+
+func FetchMultipleOnchainValidatorInfo(ctx context.Context, client *ethclient.Client, eigenpodAddress string, allValidators []ValidatorWithIndex) ([]ValidatorWithOnchainInfo, error) {
+	allMulticalls, err := FetchMultipleOnchainValidatorInfoMulticalls(eigenpodAddress, utils.Map(allValidators, func(validator ValidatorWithIndex, i uint64) *phase0.Validator { return validator.Validator }))
+	if err != nil {
+		return nil, fmt.Errorf("failed to form multicalls: %s", err.Error())
+	}
 
 	// make the multicall requests
-	multicallInstance, err := multicall.NewMulticallContract(ctx, client, nil, 4096 /* no batching */)
+	multicallInstance, err := multicall.NewMulticallClient(ctx, client, &multicall.TMulticallClientOptions{
+		MaxBatchSizeBytes: 4096,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to contact multicall: %s", err.Error())
 	}
@@ -389,6 +400,15 @@ func IsAwaitingWithdrawalCredentialProof(validatorInfo onchain.IEigenPodValidato
 	return (validatorInfo.Status == ValidatorStatusInactive) && validator.ExitEpoch == FAR_FUTURE_EPOCH && validator.ActivationEpoch != FAR_FUTURE_EPOCH
 }
 
+// this is a mapping from <chainId, genesis_fork_version>.
+func ForkVersions() map[uint64]string {
+	return map[uint64]string{
+		11155111: "90000069", //sepolia (https://github.com/eth-clients/sepolia/blob/main/README.md?plain=1#L66C26-L66C36)
+		17000:    "01017000", //holesky (https://github.com/eth-clients/holesky/blob/main/README.md)
+		1:        "00000000", // mainnet (https://github.com/eth-clients/mainnet)
+	}
+}
+
 func GetClients(ctx context.Context, node, beaconNodeUri string, enableLogs bool) (*ethclient.Client, BeaconClient, *big.Int, error) {
 	eth, err := ethclient.Dial(node)
 	if err != nil {
@@ -407,6 +427,13 @@ func GetClients(ctx context.Context, node, beaconNodeUri string, enableLogs bool
 	beaconClient, err := GetBeaconClient(beaconNodeUri, enableLogs)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to reach beacon client: %w", err)
+	}
+
+	genesisForkVersion, err := beaconClient.GetGenesisForkVersion(ctx)
+	expectedForkVersion := ForkVersions()[chainId.Uint64()]
+	gotForkVersion := hex.EncodeToString((*genesisForkVersion)[:])
+	if err != nil || expectedForkVersion != gotForkVersion {
+		return nil, nil, nil, fmt.Errorf("check that both nodes correspond to the same network and try again (expected genesis_fork_version: %s, got %s)", expectedForkVersion, gotForkVersion)
 	}
 
 	return eth, beaconClient, chainId, nil
